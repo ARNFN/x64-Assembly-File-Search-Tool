@@ -3,6 +3,8 @@
 
 GetStdHandle       PROTO
 WriteFile          PROTO
+WriteConsoleW      PROTO
+GetFileType        PROTO
 ExitProcess        PROTO
 GetCommandLineW    PROTO
 GetFileAttributesW PROTO
@@ -15,6 +17,7 @@ FILE_ATTRIBUTE_DIRECTORY equ 10h
 INVALID_HANDLE_VALUE     equ -1
 INVALID_FILE_ATTRIBUTES  equ 0FFFFFFFFh
 STD_OUTPUT_HANDLE        equ -11
+FILE_TYPE_CHAR           equ 2
 WIN32_FIND_DATAW_SIZE    equ 250h
 PATH_BUF_CHARS           equ 520
 MAX_DIR_STACK_INIT       equ 256
@@ -68,20 +71,43 @@ PrintStr ENDP
 
 PrintWide PROC
     push    rbx
+    push    rsi
     sub     rsp, 28h
-    mov     rbx, rcx
-    mov     rcx, rbx
+    mov     rsi, rcx
+    mov     rcx, rsi
     call    WStrLenW
-    shl     rax, 1
-    mov     r8, rax
+    mov     ebx, eax
+    test    ebx, ebx
+    jz      pw_done
     mov     rcx, STD_OUTPUT_HANDLE
     call    GetStdHandle
     mov     rcx, rax
-    mov     rdx, rbx
+    call    GetFileType
+    cmp     eax, FILE_TYPE_CHAR
+    jne     pw_write_file
+    mov     rcx, STD_OUTPUT_HANDLE
+    call    GetStdHandle
+    mov     rcx, rax
+    mov     rdx, rsi
+    mov     r8d, ebx
+    lea     r9, written
+    mov     qword ptr [rsp+20h], 0
+    call    WriteConsoleW
+    jmp     pw_done
+pw_write_file:
+    mov     eax, ebx
+    shl     eax, 1
+    mov     r8d, eax
+    mov     rcx, STD_OUTPUT_HANDLE
+    call    GetStdHandle
+    mov     rcx, rax
+    mov     rdx, rsi
     lea     r9, written
     mov     qword ptr [rsp+20h], 0
     call    WriteFile
+pw_done:
     add     rsp, 28h
+    pop     rsi
     pop     rbx
     ret
 PrintWide ENDP
