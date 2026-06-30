@@ -1,5 +1,5 @@
 ; x64 Windows file finder - Win64 API, kernel32.lib only
-; Usage: Asm1.exe "<search_root>" "<name>"
+; Usage: Asm1.exe "<search_root>" "<name|pattern>"
 
 GetStdHandle       PROTO
 WriteFile          PROTO
@@ -28,9 +28,12 @@ written          dd 0
 matchCount       dd 0
 dirStackCount    dd 0
 dirStackCap      dd MAX_DIR_STACK_INIT
+targetIsWildcard dd 0
+patternStarIndex dd 0
 
-msgUsage         db "Usage: Asm1.exe <search_root> <name>", 13, 10, 0
+msgUsage         db "Usage: Asm1.exe <search_root> <name|pattern>", 13, 10, 0
 msgBadRoot       db "Error: search root not found or inaccessible.", 13, 10, 0
+msgBadPattern    db "Error: invalid pattern (no path wildcards; single * only).", 13, 10, 0
 msgNoMatch       db "NO MATCH", 13, 10, 0
 
 bsName           dw '\', 0
@@ -482,6 +485,109 @@ nr_done:
     ret
 NormalizeRoot ENDP
 
+; Scan targetName; AL=1 ok, AL=0 invalid pattern
+ClassifyPattern PROC
+    push    rbx
+    push    rsi
+    xor     ebx, ebx
+    lea     rsi, targetName
+cp_loop:
+    mov     ax, [rsi]
+    test    ax, ax
+    je      cp_done_scan
+    cmp     ax, '\'
+    je      cp_fail
+    cmp     ax, '*'
+    jne     cp_next
+    inc     ebx
+    cmp     ebx, 1
+    jg      cp_fail
+    mov     rax, rsi
+    lea     rcx, targetName
+    sub     rax, rcx
+    shr     rax, 1
+    mov     patternStarIndex, eax
+cp_next:
+    add     rsi, 2
+    jmp     cp_loop
+cp_done_scan:
+    cmp     ebx, 0
+    je      cp_exact
+    mov     targetIsWildcard, 1
+    mov     al, 1
+    jmp     cp_exit
+cp_exact:
+    mov     targetIsWildcard, 0
+    mov     al, 1
+    jmp     cp_exit
+cp_fail:
+    xor     al, al
+cp_exit:
+    pop     rsi
+    pop     rbx
+    ret
+ClassifyPattern ENDP
+
+; RCX = file name, RDX = pattern (targetName); AL=1 match
+MatchNamePatternW PROC
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    mov     r12, rcx
+    mov     r13, rdx
+    mov     rcx, r12
+    call    WStrLenW
+    mov     r14d, eax
+    mov     eax, patternStarIndex
+    mov     ebx, eax
+    lea     rcx, [r13 + rax*2 + 2]
+    call    WStrLenW
+    mov     edi, eax
+    mov     eax, ebx
+    add     eax, edi
+    cmp     r14d, eax
+    jl      mnp_no
+    test    ebx, ebx
+    jz      mnp_suffix
+    xor     eax, eax
+mnp_prefix_loop:
+    cmp     eax, ebx
+    jge     mnp_suffix
+    mov     cx, [r12 + rax*2]
+    cmp     cx, [r13 + rax*2]
+    jne     mnp_no
+    inc     eax
+    jmp     mnp_prefix_loop
+mnp_suffix:
+    test    edi, edi
+    jz      mnp_yes
+    mov     eax, r14d
+    sub     eax, edi
+    lea     rcx, [r12 + rax*2]
+    lea     rdx, [r13 + rbx*2 + 2]
+    sub     rsp, 28h
+    call    lstrcmpW
+    add     rsp, 28h
+    test    eax, eax
+    jnz     mnp_no
+mnp_yes:
+    mov     al, 1
+    jmp     mnp_done
+mnp_no:
+    xor     al, al
+mnp_done:
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    ret
+MatchNamePatternW ENDP
+
 ; RCX = wide file name pointer; AL=1 if . or ..
 ShouldSkipEntry PROC
     cmp     word ptr [rcx], '.'
@@ -549,11 +655,24 @@ sai_entry:
     call    ShouldSkipEntry
     test    al, al
     jnz     sai_next
+    cmp     dword ptr targetIsWildcard, 0
+    je      sai_exact_match
+    mov     eax, dword ptr [rsp+30h]
+    test    eax, FILE_ATTRIBUTE_DIRECTORY
+    jnz     sai_after_match
+    lea     rcx, [rsp+30h + FD_CFileName]
+    lea     rdx, targetName
+    call    MatchNamePatternW
+    test    al, al
+    jz      sai_after_match
+    jmp     sai_on_match
+sai_exact_match:
     lea     rcx, [rsp+30h + FD_CFileName]
     lea     rdx, targetName
     call    lstrcmpW
     test    eax, eax
     jnz     sai_after_match
+sai_on_match:
     lea     rcx, pathWork
     lea     rdx, pathCurrent
     lea     r8, [rsp+30h + FD_CFileName]
@@ -612,6 +731,14 @@ main_args_ok:
     mov     ecx, 1
     call    ExitProcess
 main_root_ok:
+    call    ClassifyPattern
+    test    al, al
+    jnz     main_pattern_ok
+    lea     rcx, msgBadPattern
+    call    PrintStr
+    mov     ecx, 1
+    call    ExitProcess
+main_pattern_ok:
     mov     matchCount, 0
     call    SearchAllIterative
     cmp     dword ptr matchCount, 0
